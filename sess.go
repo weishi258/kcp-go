@@ -693,8 +693,8 @@ func (s *UDPSession) receiver(ch chan<- []byte) {
 					if s.ahead != nil{
 						aheadCount := len(s.aheadEncQuitEvent)
 						for i := 0; i < aheadCount; i++{
-							s.aheadEncQuitEvent <- true
-							s.aheadDecQuitEvent <- true
+							close(s.aheadEncQuitEvent)
+							close(s.aheadDecQuitEvent)
 						}
 					}
 					return
@@ -704,8 +704,8 @@ func (s *UDPSession) receiver(ch chan<- []byte) {
 				if s.ahead != nil{
 					aheadCount := len(s.aheadEncQuitEvent)
 					for i := 0; i < aheadCount; i++{
-						s.aheadEncQuitEvent <- true
-						s.aheadDecQuitEvent <- true
+						close(s.aheadEncQuitEvent)
+						close(s.aheadDecQuitEvent)
 					}
 				}
 				s.chErrorEvent <- err
