@@ -120,7 +120,7 @@ type (
 		chErrorEvent chan error    // notify Read() have an error
 
 		// nonce generator
-		nonce nonceMD5
+		nonce Entropy
 
 		isClosed bool // flag the session has Closed
 		mu       sync.Mutex
@@ -139,6 +139,8 @@ type (
 func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, remote net.Addr, block BlockCrypt) *UDPSession {
 	sess := new(UDPSession)
 	sess.die = make(chan struct{})
+	sess.nonce = new(nonceAES128)
+	sess.nonce.Init()
 	sess.chReadEvent = make(chan struct{}, 1)
 	sess.chWriteEvent = make(chan struct{}, 1)
 	sess.chErrorEvent = make(chan error, 1)
@@ -314,7 +316,8 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 				}
 			}
 
-			if !s.writeDelay {
+			// flush immediately if the queue is full
+			if s.kcp.WaitSnd() >= int(s.kcp.snd_wnd) || !s.writeDelay {
 				s.kcp.flush(false)
 			}
 			s.mu.Unlock()
@@ -508,7 +511,7 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // steps:
 // 0. Header extending
 // 1. FEC packet generation
-// 2. CRC32 caculation
+// 2. CRC32 integrity
 // 3. Encryption
 // 4. WriteTo kernel
 func (s *UDPSession) output(buf []byte) {
@@ -566,11 +569,11 @@ func (s *UDPSession) output(buf []byte) {
 // kcp update, returns interval for next calling
 func (s *UDPSession) update() (interval time.Duration) {
 	s.mu.Lock()
-	s.kcp.flush(false)
-	if s.kcp.WaitSnd() < int(s.kcp.snd_wnd) {
+	waitsnd := s.kcp.WaitSnd()
+	interval = time.Duration(s.kcp.flush(false)) * time.Millisecond
+	if s.kcp.WaitSnd() < waitsnd {
 		s.notifyWriteEvent()
 	}
-	interval = time.Duration(s.kcp.interval) * time.Millisecond
 	s.mu.Unlock()
 	return
 }
@@ -598,6 +601,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 	if s.fecDecoder != nil {
 		f := s.fecDecoder.decodeBytes(data)
 		s.mu.Lock()
+		waitsnd := s.kcp.WaitSnd()
 		if f.flag == typeData {
 			if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, s.ackNoDelay); ret != 0 {
 				kcpInErrors++
@@ -632,14 +636,22 @@ func (s *UDPSession) kcpInput(data []byte) {
 		if n := s.kcp.PeekSize(); n > 0 {
 			s.notifyReadEvent()
 		}
+		// to notify the writers when queue is shorter(e.g. ACKed)
+		if s.kcp.WaitSnd() < waitsnd {
+			s.notifyWriteEvent()
+		}
 		s.mu.Unlock()
 	} else {
 		s.mu.Lock()
+		waitsnd := s.kcp.WaitSnd()
 		if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
 			kcpInErrors++
 		}
 		if n := s.kcp.PeekSize(); n > 0 {
 			s.notifyReadEvent()
+		}
+		if s.kcp.WaitSnd() < waitsnd {
+			s.notifyWriteEvent()
 		}
 		s.mu.Unlock()
 	}
@@ -1191,8 +1203,11 @@ func NewConn(raddr string, block BlockCrypt, dataShards, parityShards int, conn 
 	return newUDPSession(convid, dataShards, parityShards, nil, conn, udpaddr, block), nil
 }
 
-// returns current time in milliseconds
-func currentMs() uint32 { return uint32(time.Now().UnixNano() / int64(time.Millisecond)) }
+// monotonic reference time point
+var refTime time.Time = time.Now()
+
+// currentMs returns current elasped monotonic milliseconds since program startup
+func currentMs() uint32 { return uint32(time.Now().Sub(refTime) / time.Millisecond) }
 
 // connectedUDPConn is a wrapper for net.UDPConn which converts WriteTo syscalls
 // to Write syscalls that are 4 times faster on some OS'es. This should only be
