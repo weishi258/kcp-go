@@ -2,7 +2,6 @@ package kcp
 
 import (
 	"bytes"
-	"crypto/aes"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
